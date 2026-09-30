@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Staff — audio to notation</title>
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.2/build/cjs/vexflow.js"></script>
+<style>
+  :root{--paper:#EAEAF0;--card:#F6F6FA;--ink:#1C1C26;--soft:#4A4A5A;--accent:#7A2E3A;--on:#fff;--line:#CFCFDA;}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--paper:#15151C;--card:#1E1E28;--ink:#EDEDF4;--soft:#A8A8B8;--accent:#D98A98;--on:#15151C;--line:#33333F;}}
+  :root[data-theme="dark"]{--paper:#15151C;--card:#1E1E28;--ink:#EDEDF4;--soft:#A8A8B8;--accent:#D98A98;--on:#15151C;--line:#33333F;}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:'Inter',system-ui,sans-serif;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);min-height:100%}
+  .wrap{max-width:820px;margin:0 auto;padding:48px 24px 64px}
+  h1{font-family:'Lora',Georgia,serif;font-weight:600;font-size:2rem;letter-spacing:-.01em;margin:0 0 6px}
+  .sub{color:var(--soft);font-size:.95rem;margin:0 0 32px;max-width:58ch;line-height:1.55}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:24px;margin-bottom:20px}
+  .drop{display:block;border:1.5px dashed var(--line);border-radius:3px;padding:32px 20px;text-align:center;cursor:pointer;transition:border-color .15s}
+  .drop:hover,.drop.drag{border-color:var(--accent)}
+  .drop input{display:none}
+  .drop p{margin:0;color:var(--soft);font-size:.9rem}
+  .drop .fname{color:var(--ink);font-weight:500;margin-top:6px}
+  .row{display:flex;gap:12px;align-items:center;margin-top:16px;flex-wrap:wrap}
+  button{font:500 .9rem 'Inter',sans-serif;background:var(--accent);color:var(--on);border:none;border-radius:3px;padding:10px 20px;cursor:pointer}
+  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  .status{color:var(--soft);font-size:.85rem;min-height:1.2em}
+  .error{color:var(--accent);font-size:.9rem;margin-top:12px;line-height:1.5;display:none}
+  .meta{display:flex;gap:22px;color:var(--soft);font-size:.85rem;margin-top:16px;flex-wrap:wrap}
+  .meta b{color:var(--ink);font-weight:600}
+  .staff-panel{overflow-x:auto;padding:20px 12px;background:#fff !important;display:none}
+  @media (max-width:520px){.wrap{padding:28px 16px 48px}.panel{padding:18px}}
+  .fine{color:var(--soft);font-size:.8rem;line-height:1.6;margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Staff</h1>
+  <p class="sub">Upload a recording of one melodic line — humming, whistling, singing, or a single instrument — and get it back as notation with a tempo, key signature and rests. Full mixes and chords won't separate cleanly.</p>
+
+  <div class="panel">
+    <label class="drop" id="drop">
+      <input type="file" id="fileInput" accept="audio/*,video/*">
+      <p>Drop a file here, or click to choose one</p>
+      <p class="fname" id="fname"></p>
+    </label>
+    <div class="row">
+      <button id="go" disabled>Transcribe</button>
+      <span class="status" id="status" aria-live="polite"></span>
+    </div>
+    <div class="error" id="err" role="alert"></div>
+  </div>
+
+  <div class="panel" id="bar" style="display:none">
+    <div class="row" style="margin-top:0">
+      <button id="play">Play</button>
+      <button id="save" class="ghost">Save MIDI</button>
+    </div>
+    <div class="meta" id="meta"></div>
+  </div>
+
+  <div class="panel staff-panel" id="staffPanel">
+    <div id="staffHost"></div>
+  </div>
+  <p class="fine" id="fine" style="display:none">Rhythm is snapped to an eighth-note grid at the detected tempo, in 4/4 from the first note. Repeated notes with no pause between them may merge into one. Only the first 90 seconds are analysed.</p>
+</div>
+
+<script>
+const $=i=>document.getElementById(i);
+const fileInput=$('fileInput'),drop=$('drop'),fname=$('fname'),go=$('go'),statusEl=$('status'),errEl=$('err'),bar=$('bar'),meta=$('meta'),staffPanel=$('staffPanel'),host=$('staffHost'),playBtn=$('play'),saveBtn=$('save'),fine=$('fine');
+let file=null,ac=null,result=null,playing=[],playTimer=null;
+const MAX_SEC=90,TARGET_SR=11025;
+const pause=()=>new Promise(r=>setTimeout(r,0));
+const say=t=>statusEl.textContent=t;
+const fail=t=>{errEl.textContent=t;errEl.style.display='block'};
+
+
+drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag')});
+drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
+drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('drag');if(e.dataTransfer.files[0])setFile(e.dataTransfer.files[0])});
+fileInput.addEventListener('change',e=>{if(e.target.files[0])setFile(e.target.files[0])});
+function setFile(f){file=f;fname.textContent=f.name;go.disabled=false;errEl.style.display='none';say('');stop()}
+
+go.onclick=async()=>{
+  if(!file)return;
+  go.disabled=true;errEl.style.display='none';bar.style.display=staffPanel.style.display=fine.style.display='none';stop();
+  try{
+    say('Decoding audio…');
+    const d=await decode(file);
+    const fr=await track(d.x,d.sr);
+    say('Building notation…');await pause();
+    const notes=segment(fr,d.sr);
+    if(!notes.length)throw new Error('No clear pitch was found. Try a recording with one steady melodic line and little background noise.');
+    result=build(notes);
+    staffPanel.style.display='block';
+    render(result);
+    bar.style.display='block';fine.style.display='block';
+    say('Done.');
+  }catch(e){console.error(e);fail(e.message||'Something went wrong reading that file.');say('');staffPanel.style.display='none'}
+  finally{go.disabled=false}
+};
+
+async function decode(f){
+  const raw=await f.arrayBuffer();
+  ac=ac||new(window.AudioContext||window.webkitAudioContext)();
+  let ab;
+  try{ab=await ac.decodeAudioData(raw)}catch(e){throw new Error("This file's audio couldn't be decoded. Try converting it to .wav or .mp3.")}
+  const sr0=ab.sampleRate,n=Math.min(ab.length,Math.floor(MAX_SEC*sr0)),F=Math.max(1,Math.round(sr0/TARGET_SR)),m=Math.floor(n/F);
+  const chs=[...Array(ab.numberOfChannels)].map((_,c)=>ab.getChannelData(c)),x=new Float32Array(m);
+  for(let i=0;i<m;i++){let s=0;for(const ch of chs)for(let k=0;k<F;k++)s+=ch[i*F+k];x[i]=s/(F*chs.length)}
+  return{x,sr:sr0/F};
+}
+
+// YIN pitch tracker on a 11 kHz downsample: one MIDI value per 20 ms frame, NaN where unvoiced
+async function track(x,sr){
+  const W=512,tauMax=Math.ceil(sr/65),tauMin=Math.floor(sr/1200),hop=Math.round(sr*.02);
+  const N=Math.max(0,Math.floor((x.length-W-tauMax)/hop)),d=new Float32Array(tauMax+2),m=new Float32Array(N).fill(NaN);
+  for(let f=0;f<N;f++){
+    const o=f*hop;let e=0;
+    for(let i=0;i<W;i++)e+=x[o+i]*x[o+i];
+    if(Math.sqrt(e/W)>=.01){
+      for(let t=1;t<=tauMax;t++){let s=0;for(let i=0;i<W;i++){const v=x[o+i]-x[o+i+t];s+=v*v}d[t]=s}
+      let run=0;for(let t=1;t<=tauMax;t++){run+=d[t];d[t]=run?d[t]*t/run:1}
+      let t=tauMin;
+      for(;t<tauMax;t++)if(d[t]<.15){while(t+1<tauMax&&d[t+1]<d[t])t++;break}
+      if(t<tauMax&&d[t]<.15){const a=d[t-1],b=d[t],c=d[t+1],den=a-2*b+c,p=t+(den?(a-c)/(2*den):0);m[f]=69+12*Math.log2(sr/p/440)}
+    }
+    if(f%200===0){say('Detecting pitch… '+Math.round(f/N*100)+'%');await pause()}
+  }
+  return{m,hop};
+}
+
+// smooth, then group frames into notes
+function segment({m,hop},sr){
+  const n=m.length,s=new Float32Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(!(m[i]>0))continue;
+    const w=[];for(let k=-2;k<=2;k++){const v=m[i+k];if(v>0)w.push(v)}
+    if(w.length>=3){w.sort((a,b)=>a-b);s[i]=w[w.length>>1]}
+  }
+  const med=a=>{const b=[...a].sort((p,q)=>p-q);return b[b.length>>1]};
+  const notes=[];let cur=null,miss=0;
+  const close=()=>{if(cur&&cur.v.length>=3)notes.push({midi:Math.round(med(cur.v)),t0:cur.a*hop/sr,t1:(cur.z+1)*hop/sr});cur=null;miss=0};
+  for(let i=0;i<n;i++){
+    const v=s[i];
+    if(!(v>0)){if(cur&&++miss>2)close();continue}
+    if(cur&&Math.abs(v-med(cur.v))>.7)close();
+    if(!cur)cur={a:i,z:i,v:[]};
+    cur.v.push(v);cur.z=i;miss=0;
+  }
+  close();
+  return notes.slice(0,160);
+}
+
+const MAJ=[6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88],MIN=[6.33,2.68,3.52,5.38,2.6,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+const PC=['C','Db','D','Eb','E','F','F#','G','Ab','A','Bb','B'];
+function findKey(notes){
+  const h=Array(12).fill(0);for(const n of notes)h[n.midi%12]+=n.t1-n.t0;
+  const hm=h.reduce((a,b)=>a+b)/12;
+  const cor=(p,t)=>{const pm=p.reduce((a,b)=>a+b)/12;let a=0,b=0,c=0;for(let i=0;i<12;i++){const x=h[(i+t)%12]-hm,y=p[i]-pm;a+=x*y;b+=x*x;c+=y*y}return a/Math.sqrt(b*c||1)};
+  let best={c:-2};
+  for(let t=0;t<12;t++)for(const minor of[0,1]){const c=cor(minor?MIN:MAJ,t);if(c>best.c)best={c,t,minor}}
+  const maj=(best.t+(best.minor?3:0))%12;
+  return{sig:PC[maj],flats:[5,10,3,8,1].includes(maj),label:PC[best.t]+(best.minor?' minor':' major')};
+}
+
+// tempo from onset spacing, then snap notes to an eighth-note grid and fill gaps with rests
+function build(notes){
+  const T0=notes[0].t0;let best=[1e9,100];
+  for(let bpm=60;bpm<=180;bpm++){
+    const g=30/bpm;let e=0;
+    for(const n of notes){const u=(n.t0-T0)/g;e+=Math.abs(u-Math.round(u))}
+    const c=e/notes.length+.08*Math.abs(Math.log2(bpm/100));
+    if(c<best[0])best=[c,bpm];
+  }
+  const bpm=best[1],g=30/bpm,ev=[];let cur=0;
+  for(const n of notes){
+    const s=Math.max(cur,Math.round((n.t0-T0)/g)),e=Math.max(s+1,Math.round((n.t1-T0)/g));
+    if(s>cur)ev.push({r:1,len:s-cur});
+    ev.push({midi:n.midi,len:e-s});cur=e;
+  }
+  return{ev,bpm,key:findKey(notes),notes};
+}
+
+const SN=['c','c#','d','d#','e','f','f#','g','g#','a','a#','b'],FN=['c','db','d','eb','e','f','gb','g','ab','a','bb','b'];
+const DUR={1:'8',2:'q',3:'qd',4:'h',6:'hd',8:'w'},PIECES=[8,6,4,3,2,1];
+function toBars(r){
+  const names=r.key.flats?FN:SN,bars=[[]];let pos=0;
+  for(const e of r.ev){
+    let left=e.len;
+    while(left>0){
+      let chunk=Math.min(left,8-pos);left-=chunk;
+      while(chunk>0){
+        const p=PIECES.find(v=>v<=chunk);chunk-=p;pos+=p;
+        bars[bars.length-1].push({r:e.r,dur:p,key:e.r?'b/4':names[e.midi%12]+'/'+(Math.floor(e.midi/12)-1),tie:!e.r&&(chunk>0||left>0)});
+      }
+      if(pos>=8){bars.push([]);pos=0}
+    }
+  }
+  if(pos>0){while(pos<8){const p=PIECES.find(v=>v<=8-pos);bars[bars.length-1].push({r:1,dur:p,key:'b/4'});pos+=p}}
+  else bars.pop();
+  return bars;
+}
+
+function render(r){
+  host.innerHTML='';
+  const VF=Vex.Flow,bars=toBars(r),acc=r.key.sig==='C'?0:{G:1,D:2,A:3,E:4,B:5,'F#':6,F:1,Bb:2,Eb:3,Ab:4,Db:5}[r.key.sig];
+  const W=Math.max(260,Math.min(780,host.parentElement.clientWidth-24)),per=W<400?1:W<560?2:4,lines=Math.ceil(bars.length/per);
+  const div=document.createElement('div');host.appendChild(div);
+  const rd=new VF.Renderer(div,VF.Renderer.Backends.SVG);rd.resize(W,lines*130+30);
+  const ctx=rd.getContext(),all=[];
+  for(let l=0;l<lines;l++){
+    const row=bars.slice(l*per,l*per+per),extra=54+acc*10+(l?0:26),bw=(W-20-extra)/per;
+    let x=10;
+    row.forEach((bar,k)=>{
+      const w=bw+(k?0:extra),st=new VF.Stave(x,l*130+20,w);
+      if(!k){st.addClef('treble');if(acc)st.addKeySignature(r.key.sig);if(!l)st.addTimeSignature('4/4')}
+      if(l*per+k===bars.length-1)st.setEndBarType(VF.Barline.type.END);
+      st.setContext(ctx).draw();
+      const notes=bar.map(b=>{
+        const n=new VF.StaveNote({keys:[b.key],duration:DUR[b.dur]+(b.r?'r':'')});
+        if(b.dur===3||b.dur===6)VF.Dot.buildAndAttach([n],{all:true});
+        n._tie=b.tie;n._line=l;return n;
+      });
+      const v=new VF.Voice({num_beats:4,beat_value:4});
+      v.setStrict(false);v.addTickables(notes);
+      VF.Accidental.applyAccidentals([v],r.key.sig);
+      new VF.Formatter().joinVoices([v]).format([v],Math.max(40,st.getNoteEndX()-st.getNoteStartX()-16));
+      const beams=VF.Beam.generateBeams(notes);
+      v.draw(ctx,st);beams.forEach(b=>b.setContext(ctx).draw());
+      all.push(...notes);x+=w;
+    });
+  }
+  const tie=(a,b)=>new VF.StaveTie({first_note:a,last_note:b,first_indices:[0],last_indices:[0]}).setContext(ctx).draw();
+  all.forEach((n,i)=>{const m=all[i+1];if(!n._tie||!m)return;if(n._line===m._line)tie(n,m);else{tie(n,null);tie(null,m)}});
+
+  const nm=m=>PC[m%12]+(Math.floor(m/12)-1),ms=r.notes.map(n=>n.midi);
+  meta.innerHTML=`<span><b>${r.notes.length}</b> notes</span><span>Range <b>${nm(Math.min(...ms))}–${nm(Math.max(...ms))}</b></span><span>Tempo <b>${r.bpm}</b> bpm</span><span>Key <b>${r.key.label}</b></span>`;
+}
+
+function play(){
+  if(playing.length){stop();return}
+  ac.resume();
+  const g=30/result.bpm;let t=ac.currentTime+.1;
+  for(const e of result.ev){
+    const d=e.len*g;
+    if(!e.r){
+      const o=ac.createOscillator(),a=ac.createGain();
+      o.type='triangle';o.frequency.value=440*2**((e.midi-69)/12);
+      a.gain.setValueAtTime(0,t);a.gain.linearRampToValueAtTime(.25,t+.02);a.gain.setValueAtTime(.25,t+d*.85);a.gain.linearRampToValueAtTime(0,t+d*.98);
+      o.connect(a);a.connect(ac.destination);o.start(t);o.stop(t+d);playing.push(o);
+    }
+    t+=d;
+  }
+  playBtn.textContent='Stop';
+  playTimer=setTimeout(stop,(t-ac.currentTime)*1000+100);
+}
+function stop(){clearTimeout(playTimer);playing.forEach(o=>{try{o.stop()}catch(e){}});playing=[];playBtn.textContent='Play'}
+playBtn.onclick=play;
+
+function midiBytes(r){
+  const T=240,b=[],vl=n=>{const o=[n&127];while(n>>=7)o.unshift((n&127)|128);return o};
+  const us=Math.round(6e7/r.bpm);
+  b.push(0,0xFF,0x51,3,us>>16&255,us>>8&255,us&255,0,0xFF,0x58,4,4,2,24,8);
+  let rest=0;
+  for(const e of r.ev){
+    if(e.r){rest+=e.len*T;continue}
+    b.push(...vl(rest),0x90,e.midi,80,...vl(e.len*T),0x80,e.midi,0);rest=0;
+  }
+  b.push(...vl(rest),0xFF,0x2F,0);
+  const L=b.length;
+  return new Uint8Array([0x4d,0x54,0x68,0x64,0,0,0,6,0,0,0,1,1,0xE0,0x4d,0x54,0x72,0x6b,L>>24&255,L>>16&255,L>>8&255,L&255,...b]);
+}
+saveBtn.onclick=()=>{
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([midiBytes(result)],{type:'audio/midi'}));
+  a.download=(file&&file.name.replace(/\.[^.]+$/,'')||'melody')+'.mid';
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+};
+</script>
+</body>
+</html>
